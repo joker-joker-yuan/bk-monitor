@@ -40,7 +40,7 @@ class StrategyTemplateViewSet(GenericViewSet):
             "compare": serializers.StrategyTemplateCompareRequestSerializer,
             "alerts": serializers.StrategyTemplateAlertsRequestSerializer,
         }
-        print("test")
+        print("test2")
         return action_serializer_map.get(self.action) or self.serializer_class
 
     def retrieve(self, request: Request, *args, **kwargs) -> Response:
