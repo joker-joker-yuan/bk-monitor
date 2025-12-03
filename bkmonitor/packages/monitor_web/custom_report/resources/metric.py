@@ -26,7 +26,7 @@ from core.errors.custom_report import (
     CustomValidationLabelError,
     CustomValidationNameError,
 )
-from monitor_web.constants import ETL_CONFIG
+from monitor_web.constants import ETL_CONFIG, CustomTSMetricType
 from monitor_web.custom_report.serializers import (
     CustomTSGroupingRuleSerializer,
     CustomTSTableSerializer,
@@ -561,55 +561,63 @@ class GetCustomTsFields(Resource):
     """
 
     class RequestSerializer(serializers.Serializer):
-        bk_biz_id = serializers.IntegerField(label=_("业务 ID"), required=True)
-        time_series_group_id = serializers.IntegerField(label=_("自定义时序 ID"), required=True)
+        bk_biz_id = serializers.IntegerField(label=_("业务 ID"))
+        time_series_group_id = serializers.IntegerField(label=_("自定义时序 ID"))
         is_mock = serializers.BooleanField(label=_("是否 mock 数据"), default=False)
 
     def perform_request(self, params: dict):
+        bk_biz_id: int = params["bk_biz_id"]
+        time_series_group_id: int = params["time_series_group_id"]
         if params["is_mock"]:
             return mock_data.CUSTOM_TIME_SERIES_FIELDS
-        table = CustomTSTable.objects.filter(
-            bk_biz_id=params["bk_biz_id"],
-            time_series_group_id=params["time_series_group_id"],
+        ts_table: CustomTSTable | None = CustomTSTable.objects.filter(
+            bk_biz_id=bk_biz_id,
+            time_series_group_id=time_series_group_id,
         ).first()
-        if not table:
+        if not ts_table:
             raise ValidationError(
-                f"custom time series table not found, bk_biz_id: {params['bk_biz_id']}, "
-                f"time_series_group_id: {params['time_series_group_id']}"
+                f"custom time series table not found, bk_biz_id: {bk_biz_id}, "
+                f"time_series_group_id: {time_series_group_id}"
             )
 
-        dimensions = []
-        metrics = []
-        for item in CustomTSField.objects.filter(time_series_group_id=table.time_series_group_id):
-            if item.type == CustomTSField.MetricType.DIMENSION:
-                dimensions.append(
-                    {
-                        "name": item.name,
-                        "type": CustomTSField.MetricType.DIMENSION,
-                        "description": item.description,
-                        "disabled": item.disabled,
-                        "hidden": item.config.get("hidden", False),
-                        "common": item.config.get("common", False),
-                        "create_time": item.create_time.timestamp() if item.create_time else None,
-                        "update_time": item.update_time.timestamp() if item.update_time else None,
-                    }
-                )
-            else:
+        dimensions: list[dict[str, Any]] = []
+        metrics: list[dict[str, Any]] = []
+        for scope_dict in ts_table.query_time_series_scope:
+            scope_id: int | None = scope_dict.get("scope_id")
+            scope_name: str = scope_dict.get("scope_name", "")
+            for metric_dict in scope_dict.get("metric_list", []):
                 metrics.append(
                     {
-                        "name": item.name,
-                        "type": CustomTSField.MetricType.METRIC,
-                        "description": item.description,
-                        "disabled": item.disabled,
-                        "unit": item.config.get("unit", ""),
-                        "hidden": item.config.get("hidden", False),
-                        "aggregate_method": item.config.get("aggregate_method", ""),
-                        "function": item.config.get("function", {}),
-                        "interval": item.config.get("interval", 0),
-                        "label": item.config.get("label", []),
-                        "dimensions": item.config.get("dimensions", []),
-                        "create_time": item.create_time.timestamp() if item.create_time else None,
-                        "update_time": item.update_time.timestamp() if item.update_time else None,
+                        "scope_id": scope_id,
+                        "scope_name": scope_name,
+                        "field_id": metric_dict.get("field_id"),
+                        "name": metric_dict.get("metric_name", ""),
+                        "type": CustomTSMetricType.METRIC,
+                        "description": metric_dict.get("desc", ""),
+                        "disabled": metric_dict.get("disabled", False),
+                        "unit": metric_dict.get("unit", ""),
+                        "hidden": metric_dict.get("hidden", False),
+                        "aggregate_method": metric_dict.get("aggregate_method", ""),
+                        "function": metric_dict.get("function", {}),
+                        "interval": metric_dict.get("interval", 0),
+                        "dimensions": metric_dict.get("tag_list", []),
+                        "create_time": metric_dict.get("create_time", None),
+                        "update_time": metric_dict.get("update_time", None),
+                    }
+                )
+            for dimension_name, dimension_dict in scope_dict.get("dimension_config", {}).items():
+                dimensions.append(
+                    {
+                        "scope_id": scope_id,
+                        "scope_name": scope_name,
+                        "name": dimension_name,
+                        "type": CustomTSMetricType.DIMENSION,
+                        "description": dimension_dict.get("desc", ""),
+                        "disabled": False,
+                        "hidden": dimension_dict.get("hidden", False),
+                        "common": dimension_dict.get("common", False),
+                        "create_time": None,
+                        "update_time": None,
                     }
                 )
         return {"dimensions": dimensions, "metrics": metrics}
