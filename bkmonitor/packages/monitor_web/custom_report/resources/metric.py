@@ -1,7 +1,7 @@
-import copy
 import logging
 import re
 from collections import defaultdict
+from typing import Any
 from functools import reduce
 
 from django.conf import settings
@@ -506,38 +506,39 @@ class CustomTimeSeriesDetail(Resource):
     """
 
     class RequestSerializer(serializers.Serializer):
-        bk_biz_id = serializers.IntegerField(required=True)
-        time_series_group_id = serializers.IntegerField(label=_("自定义时序 ID"), required=True)
-        model_only = serializers.BooleanField(label=_("是否只查询自定义时序表信息"), required=False, default=False)
-        with_target = serializers.BooleanField(label=_("是否查询 target"), required=False, default=False)
-        with_metrics = serializers.BooleanField(label=_("是否查询指标信息"), required=False, default=True)
+        bk_biz_id = serializers.IntegerField(label=_("业务 ID"))
+        time_series_group_id = serializers.IntegerField(label=_("自定义时序 ID"))
+        model_only = serializers.BooleanField(label=_("是否只查询自定义时序表信息"), default=False)
+        with_target = serializers.BooleanField(label=_("是否查询 target"), default=False)
+        with_metrics = serializers.BooleanField(label=_("是否查询指标信息"), default=True)
         empty_if_not_found = serializers.BooleanField(
             label=_("是否返回空数据"),
-            required=False,
             default=False,
             help_text=_("如果自定义时序表不存在，是否返回空数据"),
         )
         is_mock = serializers.BooleanField(label=_("是否是mock数据"), default=False)
 
-    def perform_request(self, params):
+    def perform_request(self, params: dict[str, Any]):
         if params["is_mock"]:
             return mock_data.CUSTOM_TIME_SERIES_DETAIL
+        bk_biz_id: int = params["bk_biz_id"]
+        time_series_group_id: int = params["time_series_group_id"]
         # 获取自定义时序表信息
-        config = CustomTSTable.objects.filter(bk_biz_id=params["bk_biz_id"], pk=params["time_series_group_id"]).first()
+        config: CustomTSTable | None = CustomTSTable.objects.filter(
+            bk_biz_id=bk_biz_id, pk=time_series_group_id
+        ).first()
         if not config:
             # 如果自定义时序表不存在，则返回空数据
             if params.get("empty_if_not_found"):
                 return {}
-            raise ValidationError(
-                f"custom time series table not found, time_series_group_id: {params['time_series_group_id']}"
-            )
+            raise ValidationError(f"custom time series table not found, time_series_group_id: {time_series_group_id}")
 
         # 如果是平台自定义时序，则需要校验业务是否匹配
-        if not config.is_platform and config.bk_biz_id != params["bk_biz_id"]:
-            raise ValidationError(f"custom time series not found, bk_biz_id: {params['bk_biz_id']}")
+        if not config.is_platform and config.bk_biz_id != bk_biz_id:
+            raise ValidationError(f"custom time series not found, bk_biz_id: {bk_biz_id}")
 
         # 序列化自定义时序表信息
-        data = CustomTSTableSerializer(config, context={"request_bk_biz_id": params["bk_biz_id"]}).data
+        data = CustomTSTableSerializer(config, context={"request_bk_biz_id": bk_biz_id}).data
 
         # 如果只查询自定义时序表信息，则直接返回
         if params.get("model_only"):
@@ -547,17 +548,10 @@ class CustomTimeSeriesDetail(Resource):
         data["access_token"] = config.token
 
         # 如果需要查询指标信息，则将指标信息写入到metric_json中
-        if params.get("with_metrics"):
-            metrics = copy.deepcopy(config.get_metrics())
-            data["metric_json"] = [{"fields": list(metrics.values())}]
-        else:
-            data["metric_json"] = []
-
+        data["metric_json"] = [{"fields": config.get_metric_fields()}] if params.get("with_metrics") else []
         # 新增查询target参数，自定义指标详情页面不需要target，默认不查询
-        if params.get("with_target"):
-            data["target"] = config.query_target(bk_biz_id=params["bk_biz_id"])
-        else:
-            data["target"] = []
+        data["target"] = config.query_target(bk_biz_id=bk_biz_id) if params.get("with_target") else []
+
         return data
 
 

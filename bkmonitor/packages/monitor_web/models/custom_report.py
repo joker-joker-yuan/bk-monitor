@@ -10,8 +10,10 @@ specific language governing permissions and limitations under the License.
 
 import re
 import time
+from typing import Any
 
 from django.db import models
+from django.utils.functional import cached_property
 
 from bkmonitor.data_source import UnifyQuery, load_data_source
 from bkmonitor.utils.cipher import transform_data_id_to_token
@@ -21,7 +23,7 @@ from bkmonitor.utils.user import get_backend_username
 from constants.common import DEFAULT_TENANT_ID
 from constants.data_source import DataSourceLabel, DataTypeLabel
 from core.drf_resource import api
-from monitor_web.constants import EVENT_TYPE
+from monitor_web.constants import EVENT_TYPE, CustomTSMetricType
 from monitor_web.models import OperateRecordModelBase
 
 
@@ -364,10 +366,13 @@ class CustomTSTable(OperateRecordModelBase):
         """
         查询 target 维度字段
         """
-        metric = CustomTSField.objects.filter(
-            time_series_group_id=self.time_series_group_id, type=CustomTSField.MetricType.METRIC
-        ).first()
-        if not metric:
+        metric_name: str = ""
+        for scope_dict in self.query_time_series_scope:
+            metric_list: list[dict[str, Any]] = scope_dict.get("metric_list", [])
+            if metric_list:
+                metric_name = metric_list[0]["metric_name"]
+                break
+        if not metric_name:
             return []
 
         data_source_class = load_data_source(DataSourceLabel.CUSTOM, DataTypeLabel.TIME_SERIES)
@@ -377,7 +382,7 @@ class CustomTSTable(OperateRecordModelBase):
                 "table": self.table_id,
                 "data_label": self.data_label,
                 "group_by": ["target"],
-                "metrics": [{"field": metric.name}],
+                "metrics": [{"field": metric_name}],
             },
         )
         query = UnifyQuery(bk_biz_id=bk_biz_id, data_sources=[data_source], expression="")
@@ -394,6 +399,52 @@ class CustomTSTable(OperateRecordModelBase):
         if not values or "values" not in values:
             return []
         return values["values"]["target"]
+
+    @cached_property
+    def query_time_series_scope(self) -> list[dict[str, Any]]:
+        return api.metadata.query_time_series_scope(group_id=self.time_series_group_id)["data"]
+
+    def get_metric_fields(self) -> list[dict[str, Any]]:
+        fields: list[dict[str, Any]] = []
+        for scope_dict in self.query_time_series_scope:
+            scope_id: int | None = scope_dict.get("scope_id")
+            scope_name: str = scope_dict.get("scope_name", "")
+            dimension_name_desc_map: dict[str, str] = {}
+            for dimension_name, dimensions_dict in scope_dict.get("dimension_config", {}).items():
+                desc: str = dimensions_dict.get("desc", "")
+                dimension_name_desc_map[dimension_name] = desc
+                fields.append(
+                    {
+                        "scope_id": scope_id,
+                        "scope_name": scope_name,
+                        "name": dimension_name,
+                        "monitor_type": CustomTSMetricType.DIMENSION,
+                        "unit": "",
+                        "description": desc,
+                        "type": CustomTSMetricType.DIMENSION,
+                        "aggregate_method": "",
+                    }
+                )
+            for metrics_dict in scope_dict.get("metric_list", []):
+                fields.append(
+                    {
+                        "scope_id": scope_id,
+                        "scope_name": scope_name,
+                        "field_id": metrics_dict.get("field_id"),
+                        "name": metrics_dict.get("metric_name", ""),
+                        "monitor_type": CustomTSMetricType.METRIC,
+                        "unit": metrics_dict.get("unit", ""),
+                        "description": "",
+                        "type": CustomTSMetricType.METRIC,
+                        "aggregate_method": metrics_dict.get("aggregate_method", ""),
+                        "dimension_list": [
+                            {"id": tag_name, "name": dimension_name_desc_map.get(tag_name, "")}
+                            for tag_name in metrics_dict.get("tag_list", [])
+                        ],
+                        "label": [scope_dict.get("scope_name", "")],
+                    }
+                )
+        return fields
 
 
 class CustomTSItem(models.Model):

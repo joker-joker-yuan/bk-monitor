@@ -38,6 +38,11 @@ class AlgorithmType:
     PartialNodes = "PartialNodes"
 
 
+class CustomTSMetricType:
+    METRIC = "metric"
+    DIMENSION = "dimension"
+
+
 class EventLevel:
     EVENT_LEVEL = (
         (1, _("致命")),
