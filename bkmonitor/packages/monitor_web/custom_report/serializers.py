@@ -82,8 +82,8 @@ class CustomTSTableSerializer(serializers.ModelSerializer):
 
 
 class CustomTSGroupingRuleSerializer(serializers.Serializer):
-    scope_id = serializers.IntegerField(label=_("分组 ID"), default=0)  # TODO: 去除 default
-    name = serializers.CharField(label=_("分组名称"), required=True)
+    scope_id = serializers.IntegerField(label=_("分组 ID"), allow_null=True, required=False)
+    name = serializers.CharField(label=_("分组名称"))
     manual_list = serializers.ListField(label=_("手动分组的指标列表"), default=list)
     auto_rules = serializers.ListField(label=_("自动分组的匹配规则列表"), default=list)
 

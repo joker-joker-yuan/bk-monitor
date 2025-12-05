@@ -8,7 +8,7 @@ from functools import reduce
 from django.conf import settings
 from django.core.paginator import Paginator
 from django.db import models
-from django.db.models import Max, Q
+from django.db.models import Q
 from django.db.transaction import atomic
 from django.utils.translation import gettext_lazy as _
 from rest_framework import serializers
@@ -1003,56 +1003,63 @@ class CreateOrUpdateGroupingRule(Resource):
     """
 
     class RequestSerializer(CustomTSGroupingRuleSerializer):
-        bk_biz_id = serializers.IntegerField(required=True, label=_("业务 ID"))
-        time_series_group_id = serializers.IntegerField(required=True, label=_("自定义时序 ID"))
+        class MetricSerializer(serializers.Serializer):
+            field_id = serializers.IntegerField(label=_("指标 ID"))
+            name = serializers.CharField(label=_("指标名称"))
+
+        bk_biz_id = serializers.IntegerField(label=_("业务 ID"))
+        time_series_group_id = serializers.IntegerField(label=_("自定义时序 ID"))
+        metric_list = serializers.ListField(label=_("关联指标"), child=MetricSerializer(), default=list)
 
     def perform_request(self, params: dict):
+        bk_biz_id: int = params["bk_biz_id"]
+        time_series_group_id: int = params["time_series_group_id"]
         # 获取自定义时序表
-        table = CustomTSTable.objects.get(
-            bk_biz_id=params["bk_biz_id"], time_series_group_id=params["time_series_group_id"]
+        ts_table: CustomTSTable = CustomTSTable.objects.get(
+            bk_biz_id=bk_biz_id, time_series_group_id=time_series_group_id
         )
-        if not table:
-            raise ValidationError(
-                f"custom time series table not found, time_series_group_id: {params['time_series_group_id']}"
+        if not ts_table:
+            raise ValidationError(f"custom time series table not found, time_series_group_id: {time_series_group_id}")
+        request_scope_id: int = params.get("scope_id")
+        request_scope_dict: dict[str, Any] = {}
+        if request_scope_id is not None:
+            request_scope_dict["scope_id"] = request_scope_id
+
+        request_scope_dict["scope_name"] = params["name"]
+        request_scope_dict["auto_rules"] = params["auto_rules"]
+
+        scope_id = api.metadata.create_or_update_time_series_scope(
+            group_id=time_series_group_id, scopes=[request_scope_dict]
+        )["data"][0]["scope_id"]
+
+        scope_dict = api.metadata.query_time_series_scope(group_id=time_series_group_id, scope_id=scope_id)["data"][0]
+
+        origin_field_ids: set[int] = {metric_dict["field_id"] for metric_dict in scope_dict["metric_list"]}
+        update_field_ids: set[int] = {metric_dict["field_id"] for metric_dict in params["metric_list"]}
+        remove_field_ids: set[int] = origin_field_ids - update_field_ids
+        update_field_ids: set[int] = update_field_ids - origin_field_ids
+        metrics: list[dict[str, Any]] = []
+        for field_id in remove_field_ids:
+            metrics.append(
+                {
+                    "field_id": field_id,
+                    "scope_name": "",  # 记得换成未分组名称
+                }
             )
+        for field_id in update_field_ids:
+            metrics.append({"field_id": field_id, "scope_name": scope_dict["scope_name"]})
+        api.metadata.create_or_update_time_series_metric(group_id=time_series_group_id, metrics=metrics)
+        scope_dict = api.metadata.query_time_series_scope(group_id=time_series_group_id, scope_id=scope_id)["data"][0]
 
-        # 获取分组规则
-        group_rules = CustomTSGroupingRule.objects.filter(
-            time_series_group_id=params["time_series_group_id"],
-            name=params["name"],
-        )
-
-        with atomic():
-            if not group_rules:
-                # 获取当前分组规则index最大值
-                max_index = (
-                    CustomTSGroupingRule.objects.filter(time_series_group_id=params["time_series_group_id"]).aggregate(
-                        Max("index")
-                    )["index__max"]
-                    or 0
-                )
-                params["index"] = max_index + 1
-                # 创建分组规则
-                grouping_rule = CustomTSGroupingRule.objects.create(
-                    time_series_group_id=params["time_series_group_id"],
-                    name=params["name"],
-                    manual_list=params["manual_list"],
-                    auto_rules=params["auto_rules"],
-                    index=params["index"],
-                )
-            else:
-                grouping_rule = group_rules[0]
-                # 更新分组信息
-                if params.get("manual_list"):
-                    grouping_rule.manual_list = params["manual_list"]
-                if params.get("auto_rules"):
-                    grouping_rule.auto_rules = params["auto_rules"]
-                grouping_rule.save()
-
-            # 分组匹配现存指标
-            table.renew_metric_labels([grouping_rule], delete=False)
-
-        return grouping_rule.to_json()
+        return {
+            "time_series_group_id": scope_dict["group_id"],
+            "scope_id": scope_dict["scope_id"],
+            "name": scope_dict["scope_name"],
+            "dimension_config": scope_dict["dimension_config"],
+            "auto_rules": scope_dict["auto_rules"],
+            "metric_list": scope_dict["metric_list"],
+            "create_from": scope_dict["create_from"],
+        }
 
 
 class PreviewGroupingRule(Resource):
