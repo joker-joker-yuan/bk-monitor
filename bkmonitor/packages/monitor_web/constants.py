@@ -42,6 +42,10 @@ class CustomTSMetricType:
     METRIC = "metric"
     DIMENSION = "dimension"
 
+    @classmethod
+    def choices(cls) -> list[tuple[str, str]]:
+        return [(cls.METRIC, _("指标")), (cls.DIMENSION, _("维度"))]
+
 
 class EventLevel:
     EVENT_LEVEL = (

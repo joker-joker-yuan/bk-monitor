@@ -1,5 +1,6 @@
 import logging
 import re
+import copy
 from collections import defaultdict
 from typing import Any
 from functools import reduce
@@ -629,100 +630,160 @@ class ModifyCustomTsFields(Resource):
     """
 
     class RequestSerializer(serializers.Serializer):
-        bk_biz_id = serializers.IntegerField(required=True, label=_("业务 ID"))
-        time_series_group_id = serializers.IntegerField(required=True, label=_("自定义时序 ID"))
+        bk_biz_id = serializers.IntegerField(label=_("业务 ID"))
+        time_series_group_id = serializers.IntegerField(label=_("自定义时序 ID"))
 
         class FieldSerializer(serializers.Serializer):
             scope_name = serializers.CharField(label=_("分组名称"), allow_blank=True, default="")
-            field_id = serializers.IntegerField(label=_("字段 ID"), required=False)
-            name = serializers.CharField(required=True, label=_("字段名"))
-            type = serializers.CharField(required=True, label=_("字段类型"))
-            description = serializers.CharField(required=False, label=_("字段描述"), allow_blank=True)
-            disabled = serializers.BooleanField(required=False, label=_("是否禁用"))
+            name = serializers.CharField(label=_("字段名"))
+            type = serializers.ChoiceField(label=_("字段类型"), choices=CustomTSMetricType.choices())
 
-            # 维度属性
-            common = serializers.BooleanField(required=False, label=_("是否常用字段"))
-
-            # 指标属性
-            unit = serializers.CharField(required=False, label=_("字段单位"), allow_blank=True)
-            hidden = serializers.BooleanField(required=False, label=_("是否隐藏"))
-            aggregate_method = serializers.CharField(required=False, label=_("聚合方法"), allow_blank=True)
-            function = serializers.JSONField(required=False, label=_("指标函数"))
-            interval = serializers.IntegerField(required=False, label=_("指标周期"))
+            field_id = serializers.IntegerField(label=_("字段 ID"), required=False, allow_null=True)
+            description = serializers.CharField(label=_("字段描述"), required=False, allow_blank=True)
+            disabled = serializers.BooleanField(label=_("是否禁用"), required=False)
+            common = serializers.BooleanField(label=_("是否常用字段"), required=False)
+            unit = serializers.CharField(label=_("字段单位"), required=False, allow_blank=True)
+            hidden = serializers.BooleanField(label=_("是否隐藏"), required=False)
+            aggregate_method = serializers.CharField(label=_("聚合方法"), required=False, allow_blank=True)
+            function = serializers.JSONField(label=_("指标函数"), required=False)
+            interval = serializers.IntegerField(label=_("指标周期"), required=False)
 
         update_fields = serializers.ListField(label=_("更新字段列表"), child=FieldSerializer(), default=list)
         delete_fields = serializers.ListField(label=_("删除字段列表"), child=FieldSerializer(), default=list)
 
-    def perform_request(self, params: dict):
-        table = CustomTSTable.objects.filter(
-            bk_biz_id=params["bk_biz_id"],
-            time_series_group_id=params["time_series_group_id"],
-        ).first()
-        if not table:
+    def perform_request(self, params: dict[str, Any]):
+        bk_biz_id: int = params["bk_biz_id"]
+        time_series_group_id: int = params["time_series_group_id"]
+        ts_table = CustomTSTable.objects.filter(bk_biz_id=bk_biz_id, time_series_group_id=time_series_group_id).first()
+        if not ts_table:
             raise ValidationError(
-                f"custom time series table not found, bk_biz_id: {params['bk_biz_id']}, "
-                f"time_series_group_id: {params['time_series_group_id']}"
+                f"custom time series table not found, bk_biz_id: {bk_biz_id}, "
+                f"time_series_group_id: {time_series_group_id}"
             )
 
+        field_id_metric_map: dict[int, Any] = {}
+        scope_dimension_config_map: dict[str, dict[str, Any]] = {}
+        scope_list: list[dict[str, Any]] = copy.deepcopy(ts_table.query_time_series_scope)
+        for scope_dict in scope_list:
+            for metric_dict in scope_dict.get("metric_list", []):
+                field_id_metric_map[metric_dict["field_id"]] = metric_dict
+            scope_dimension_config_map[scope_dict["scope_name"]] = scope_dict.get("dimension_config", {})
+
         # 删除字段
-        if params["delete_fields"]:
-            CustomTSField.objects.filter(time_series_group_id=table.time_series_group_id).filter(
-                reduce(
-                    lambda x, y: x | y, (Q(name=field["name"], type=field["type"]) for field in params["delete_fields"])
-                )
-            ).delete()
-
-        if not params["update_fields"]:
-            return
-
-        # 获取存量字段
-        fields = CustomTSField.objects.filter(time_series_group_id=table.time_series_group_id).filter(
-            reduce(lambda x, y: x | y, (Q(name=field["name"], type=field["type"]) for field in params["update_fields"]))
-        )
-        field_map = {(item.name, item.type): item for item in fields}
-
-        # 需要更新的字段
-        need_update_fields = []
-        # 需要创建的字段
-        need_create_fields = []
-        for update_field in params["update_fields"]:
-            field = field_map.get((update_field["name"], update_field["type"]))
-
-            # 根据字段类型，生成 config
-            if update_field["type"] == CustomTSField.MetricType.DIMENSION:
-                field_keys = CustomTSField.DimensionConfigFields
+        need_delete_metric_dict: dict[int, dict[str, Any]] = {}
+        delete_dimensions_by_scope: dict[str, list[dict[str, Any]]] = {}
+        delete_fields: list[dict[str, Any]] = params["delete_fields"]
+        for field_dict in delete_fields:
+            if field_dict["type"] == CustomTSMetricType.METRIC:
+                field_id: int = field_dict["field_id"]
+                if field_id not in field_id_metric_map:
+                    continue
+                metric_dict: dict[str, Any] = field_id_metric_map[field_id]
+                need_delete_metric_dict[field_id] = {
+                    "field_id": field_id,
+                    "field_config": {
+                        "desc": metric_dict.get("desc", ""),
+                        "unit": metric_dict.get("unit", ""),
+                        "hidden": metric_dict.get("hidden", False),
+                        "aggregate_method": metric_dict.get("aggregate_method", ""),
+                        "function": metric_dict.get("function", ""),
+                        "interval": metric_dict.get("interval"),
+                        "disabled": True,
+                    },
+                }
             else:
-                field_keys = CustomTSField.MetricConfigFields
-            field_config = {field_key: update_field[field_key] for field_key in field_keys if field_key in update_field}
+                # TODO: 未分组的 scope_name 要做转换
+                delete_dimensions_by_scope.setdefault(field_dict["scope_name"], []).append(field_dict)
 
-            # 如果字段存在，则更新字段
-            if field:
-                field.config.update(field_config)
-                if "description" in update_field:
-                    field.description = update_field["description"]
-                if "disabled" in update_field:
-                    field.disabled = update_field["disabled"]
-                need_update_fields.append(field)
-            else:
-                # 如果字段不存在，则创建字段
-                need_create_fields.append(
-                    CustomTSField(
-                        time_series_group_id=table.time_series_group_id,
-                        type=update_field["type"],
-                        name=update_field["name"],
-                        description=update_field.get("description", ""),
-                        disabled=update_field.get("disabled", False),
-                        config=field_config,
+        # 更新字段
+        need_create_metrics: list[dict[str, Any]] = []
+        need_update_metrics: list[dict[str, Any]] = []
+        update_dimensions_by_scope: dict[str, list[dict[str, Any]]] = {}
+        update_fields: list[dict[str, Any]] = params["update_fields"]
+        for field_dict in update_fields:
+            scope_name: str = field_dict["scope_name"]
+            if field_dict["type"] == CustomTSMetricType.METRIC:
+                field_id: int | None = field_dict.get("field_id")
+                if field_id is None:
+                    # 创建场景
+                    need_create_metrics.append(
+                        {
+                            "scope_name": field_dict["scope_name"],
+                            "field_config": {
+                                "desc": field_dict.get("desc", ""),
+                                "unit": field_dict.get("unit", ""),
+                                "hidden": field_dict.get("hidden", False),
+                                "aggregate_method": field_dict.get("aggregate_method", ""),
+                                "function": field_dict.get("function", ""),
+                                "interval": field_dict.get("interval"),
+                                "disabled": field_dict.get("disabled", False),
+                            },
+                        }
                     )
+                    continue
+                elif field_id not in field_id_metric_map or field_id in need_delete_metric_dict:
+                    continue
+                # 更新场景
+                metric_dict: dict[str, Any] = field_id_metric_map[field_id]
+                need_update_metrics.append(
+                    {
+                        "field_id": field_id,
+                        "scope_name": scope_name,
+                        "field_config": {
+                            "desc": field_dict.get("desc", metric_dict.get("desc", "")),
+                            "unit": field_dict.get("unit", metric_dict.get("unit", "")),
+                            "hidden": field_dict.get("hidden", metric_dict.get("hidden", False)),
+                            "aggregate_method": field_dict.get(
+                                "aggregate_method", metric_dict.get("aggregate_method", "")
+                            ),
+                            "function": field_dict.get("function", metric_dict.get("function", "")),
+                            "interval": field_dict.get("interval", metric_dict.get("interval")),
+                            "disabled": field_dict.get("disabled", metric_dict.get("disabled", False)),
+                        },
+                    }
                 )
+            else:
+                update_dimensions_by_scope.setdefault(scope_name, []).append(field_dict)
 
-        # 批量创建字段
-        CustomTSField.objects.bulk_create(need_create_fields, batch_size=500)
-        # 批量更新字段
-        CustomTSField.objects.bulk_update(need_update_fields, ["description", "disabled", "config"], batch_size=500)
+        update_dimensions: list[dict[str, Any]] = []
+        for scope_name in set(delete_dimensions_by_scope.keys()) | set(update_dimensions_by_scope.keys()):
+            delete_dimension_names: set[str] = {
+                field_dict["name"] for field_dict in delete_dimensions_by_scope.get(scope_name, [])
+            }
+            dimension_config = {
+                k: v for k, v in scope_dimension_config_map[scope_name].items() if k not in delete_dimension_names
+            }
+            for update_field_dict in update_dimensions_by_scope.get(scope_name, []):
+                field_name = update_field_dict["name"]
+                if field_name in dimension_config:
+                    dimension_config[field_name].update(
+                        {
+                            "desc": update_field_dict.get("desc", dimension_config[field_name].get("desc", "")),
+                            "hidden": update_field_dict.get(
+                                "hidden", dimension_config[field_name].get("hidden", False)
+                            ),
+                            "common": update_field_dict.get(
+                                "common", dimension_config[field_name].get("common", False)
+                            ),
+                        }
+                    )
+                else:
+                    dimension_config[field_name] = {
+                        "desc": update_field_dict.get("desc", ""),
+                        "hidden": update_field_dict.get("hidden", False),
+                        "common": update_field_dict.get("common", False),
+                    }
+            update_dimensions.append({"scope_name": scope_name, "dimension_config": dimension_config})
 
-        # 同步metadata
-        table.save_to_metadata(with_fields=True)
+        # 更新维度
+        if update_dimensions:
+            api.metadata.create_or_update_time_series_scope(scopes=update_dimensions)
+        # 更新指标
+        if list(need_delete_metric_dict) or need_update_metrics or need_create_metrics:
+            api.metadata.create_or_update_time_series_metric(
+                bk_tenant_id=get_request_tenant_id(),
+                metrics=list(need_delete_metric_dict.values()) + need_update_metrics + need_create_metrics,
+            )
 
 
 class ValidateCustomTsGroupLabel(Resource):
