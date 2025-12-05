@@ -892,34 +892,30 @@ class CustomTsGroupingRuleList(Resource):
         is_mock = serializers.BooleanField(label=_("是否为 mock 数据"), default=False)
 
     def perform_request(self, params: dict):
+        bk_biz_id: int = params["bk_biz_id"]
+        time_series_group_id: int = params["time_series_group_id"]
         if params["is_mock"]:
             return mock_data.CUSTOM_TS_GROUPING_RULE_LIST
         # 获取自定义时序表
-        table = CustomTSTable.objects.get(
-            bk_biz_id=params["bk_biz_id"], time_series_group_id=params["time_series_group_id"]
+        ts_table: CustomTSTable = CustomTSTable.objects.get(
+            bk_biz_id=bk_biz_id, time_series_group_id=time_series_group_id
         )
-        if not table:
-            raise ValidationError(
-                f"custom time series table not found, time_series_group_id: {params['time_series_group_id']}"
+        if not ts_table:
+            raise ValidationError(f"custom time series table not found, time_series_group_id: {time_series_group_id}")
+        result: list[dict[str, Any]] = []
+        scope_list: list[dict[str, Any]] = ts_table.query_time_series_scope
+        for scope_dict in scope_list:
+            manual_list: list[str] = scope_dict.get("manual_list", [])
+            result.append(
+                {
+                    "scope_id": scope_dict["scope_id"],
+                    "name": scope_dict["scope_name"],
+                    "manual_list": manual_list,
+                    "auto_rules": scope_dict.get("auto_rules", []),
+                    "metric_count": len(manual_list),
+                    "create_from": scope_dict["create_from"],
+                }
             )
-
-        # 获取指标信息
-        metrics = CustomTSField.objects.filter(
-            time_series_group_id=table.time_series_group_id, type=CustomTSField.MetricType.METRIC
-        )
-        # 分组计数
-        group_metric_count = defaultdict(int)
-        for metric in metrics:
-            for group in metric.config.get("label", []):
-                group_metric_count[group] += 1
-
-        # 获取分组规则
-        grouping_rules = CustomTSGroupingRule.objects.filter(
-            time_series_group_id=params["time_series_group_id"]
-        ).order_by("index")
-        result = CustomTSGroupingRuleSerializer(grouping_rules, many=True).data
-        for rule in result:
-            rule["metric_count"] = group_metric_count[rule["name"]]
         return result
 
 
